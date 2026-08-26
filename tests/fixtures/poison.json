@@ -1,0 +1,122 @@
+[
+  {
+    "name": "zone_offset_milliseconds",
+    "description": "zone_offset written in milliseconds (7200000) instead of seconds (7200). HC rejects the entire import with java.time.DateTimeException.",
+    "payload": {
+      "table": "weight_record_table",
+      "values": {
+        "time": 1705303800000,
+        "zone_offset": 7200000,
+        "weight": 68.5
+      }
+    }
+  },
+  {
+    "name": "record_at_cutoff_timestamp",
+    "description": "A steps record whose start_time equals the cutoff timestamp (2026-03-18T00:00:00Z). Invariant test: records must be strictly before cutoff.",
+    "payload": {
+      "table": "steps_record_table",
+      "values": {
+        "start_time": 1773792000000,
+        "start_zone_offset": 3600,
+        "end_time": 1773887400000,
+        "end_zone_offset": 3600,
+        "count": 5000
+      }
+    }
+  },
+  {
+    "name": "record_after_cutoff",
+    "description": "A weight record with a timestamp 1 day after the cutoff. Builder must filter these out.",
+    "payload": {
+      "table": "weight_record_table",
+      "values": {
+        "time": 1773878400000,
+        "zone_offset": 7200,
+        "weight": 68.9
+      }
+    }
+  },
+  {
+    "name": "duplicate_uuid",
+    "description": "Two weight records with the same uuid. HC UNIQUE constraint on uuid would reject the second insert.",
+    "payload": [
+      {
+        "table": "weight_record_table",
+        "values": {
+          "uuid": "00000000000000000000000000000001",
+          "time": 1705303800000,
+          "zone_offset": 3600,
+          "weight": 68.4
+        }
+      },
+      {
+        "table": "weight_record_table",
+        "values": {
+          "uuid": "00000000000000000000000000000001",
+          "time": 1705303900000,
+          "zone_offset": 3600,
+          "weight": 68.5
+        }
+      }
+    ]
+  },
+  {
+    "name": "duplicate_dedupe_hash",
+    "description": "Two weight records with identical (app_info_id, device_info_id, time) → identical dedupe_hash. HC UNIQUE on dedupe_hash would reject the second.",
+    "payload": [
+      {
+        "table": "weight_record_table",
+        "values": {
+          "time": 1705303800000,
+          "zone_offset": 3600,
+          "weight": 68.4
+        }
+      },
+      {
+        "table": "weight_record_table",
+        "values": {
+          "time": 1705303800000,
+          "zone_offset": 3600,
+          "weight": 68.6
+        }
+      }
+    ]
+  },
+  {
+    "name": "write_to_change_logs_table",
+    "description": "Attempt to insert a row into change_logs_table (DO_NOT_TOUCH). WriteGuard must raise ProtectedTableError.",
+    "payload": {
+      "table": "change_logs_table",
+      "values": {
+        "uuids": "00000000000000000000000000000001",
+        "time": 1773792000000
+      }
+    }
+  },
+  {
+    "name": "write_to_local_date_time_column",
+    "description": "Attempt to write to the generated column local_date_time. WriteGuard must raise ProtectedTableError.",
+    "payload": {
+      "table": "weight_record_table",
+      "values": {
+        "time": 1705303800000,
+        "zone_offset": 3600,
+        "local_date_time": 1705339800000,
+        "weight": 68.4
+      }
+    }
+  },
+  {
+    "name": "negative_zone_offset_out_of_range",
+    "description": "zone_offset of -72000 (outside ±64800 range). HC would reject with DateTimeException.",
+    "payload": {
+      "table": "weight_record_table",
+      "values": {
+        "time": 1705303800000,
+        "zone_offset": -72000,
+        "weight": 68.5
+      }
+    }
+  }
+]

@@ -1,0 +1,31 @@
+[project]
+name = "ghc-db-manager"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "Merge historical health data into an Android Health Connect export database"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "ghc-db-manager contributors"}]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Android",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Home Automation",
+    "Topic :: Medical",
+]
+
+[project.scripts]
+ghcdb = "ghc_db_manager.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

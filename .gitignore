@@ -1,0 +1,25 @@
+# Dot-prefixed files — not synced (editor/OS/tool state)
+.*
+!.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Test / build artifacts (generated, never commit)
+*.db
+*.sqlite
+*.zip
+tests/tmp/
+/tmp/
+coverage/
+.coverage
+
+# OS junk
+.DS_Store
+Thumbs.db
