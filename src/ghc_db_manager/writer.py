@@ -47,7 +47,7 @@ def _validate_record(rec: CanonicalRecord) -> None:
     Raises ``RecordError`` if:
     - zone_offset is outside ±64800 seconds
     - ms is not a positive integer
-    - value is not positive
+    (value plausibility is enforced by domain layers, e.g. weight band in domains/weight.py)
     """
     if rec.zone_offset_seconds < -kn.ZONE_OFFSET_MAX_SECONDS:
         raise RecordError(
@@ -61,8 +61,6 @@ def _validate_record(rec: CanonicalRecord) -> None:
         )
     if rec.ms <= 0:
         raise RecordError(f"ms must be positive, got {rec.ms}")
-    if rec.value <= 0:
-        raise RecordError(f"value must be positive, got {rec.value}")
 
 
 # ---------------------------------------------------------------------------
@@ -358,9 +356,9 @@ def write_interval(
         rec_method = _INTERVAL_RECORDING_METHOD.get(kind, 2)
 
         # Get start_ms/end_ms — handle both methods (IntervalRecord) and properties (canonical records)
-        def _ms(r, attr):
-            v = getattr(r, attr)
-            return v() if callable(v) else v
+        def _ms(r, attr) -> int:
+            v: object = getattr(r, attr)
+            return int(v() if callable(v) else v)  # type: ignore[call-arg,assignment]
 
         start_ms = _ms(rec, 'start_ms')
         end_ms = _ms(rec, 'end_ms')

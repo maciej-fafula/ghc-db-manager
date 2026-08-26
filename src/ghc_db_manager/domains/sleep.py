@@ -6,7 +6,7 @@ SLEEP_MINUTE CSV (grouped by night date, evening ≥20h → previous day rule).
 
 Rules:
   - Skip placeholder rows (start == stop)
-  - local_date = end-based epoch days (HC empirically uses end instant)
+  - local_date = start-based epoch days (HC canonical recomputed form, per PoC E.6 / hc-internals.md §4.4)
   - Stages from SLEEP_MINUTE:
       * Group by wake date
       * Evening hour (≥20) minutes belong to previous calendar night

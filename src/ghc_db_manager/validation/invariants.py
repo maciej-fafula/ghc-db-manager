@@ -39,14 +39,15 @@ _WEIGHT_TABLES = [
     ("lean_body_mass_record_table", "time",          "mass"),
 ]
 
-# Interval tables: (table_name, start_time_col, end_time_col, local_date_is_end_based)
+# Interval tables: (table_name, start_time_col, end_time_col)
+# local_date is always START-based (HC canonical recomputed form).
 _INTERVAL_TABLES = [
-    ("steps_record_table",                          "start_time", "end_time", False),
-    ("distance_record_table",                       "start_time", "end_time", False),
-    ("total_calories_burned_record_table",          "start_time", "end_time", False),
-    ("sleep_session_record_table",                  "start_time", "end_time", True),   # end-based
-    ("heart_rate_record_table",                    "start_time", "end_time", False),
-    ("exercise_session_record_table",                "start_time", "end_time", False),
+    ("steps_record_table",                          "start_time", "end_time"),
+    ("distance_record_table",                       "start_time", "end_time"),
+    ("total_calories_burned_record_table",          "start_time", "end_time"),
+    ("sleep_session_record_table",                  "start_time", "end_time"),
+    ("heart_rate_record_table",                    "start_time", "end_time"),
+    ("exercise_session_record_table",                "start_time", "end_time"),
 ]
 
 # Record-type IDs for activity_date coverage
@@ -103,16 +104,16 @@ def run_invariants(
     interval_tables_to_check: list[tuple] = []
     if "activity" in expected_domains:
         interval_tables_to_check.extend([
-            ("steps_record_table",                          "start_time", "end_time", False),
-            ("distance_record_table",                       "start_time", "end_time", False),
-            ("total_calories_burned_record_table",           "start_time", "end_time", False),
+            ("steps_record_table",                          "start_time", "end_time"),
+            ("distance_record_table",                       "start_time", "end_time"),
+            ("total_calories_burned_record_table",           "start_time", "end_time"),
         ])
     if "sleep" in expected_domains:
-        interval_tables_to_check.append(("sleep_session_record_table", "start_time", "end_time", True))
+        interval_tables_to_check.append(("sleep_session_record_table", "start_time", "end_time"))
     if "heartrate" in expected_domains:
-        interval_tables_to_check.append(("heart_rate_record_table", "start_time", "end_time", False))
+        interval_tables_to_check.append(("heart_rate_record_table", "start_time", "end_time"))
     if "exercise" in expected_domains:
-        interval_tables_to_check.append(("exercise_session_record_table", "start_time", "end_time", False))
+        interval_tables_to_check.append(("exercise_session_record_table", "start_time", "end_time"))
 
     # 1a. local_date formula + zone_offset bounds for instant tables
     for table, time_col, _ in tables_to_check:
@@ -140,11 +141,9 @@ def run_invariants(
                 f"±{kn.ZONE_OFFSET_MAX_SECONDS} seconds (possible ms→s bug)"
             )
 
-    # 1b. Interval table checks
-    for table, s_col, e_col, end_based in interval_tables_to_check:
-        # local_date invariant (start-based, or end-based for sleep)
-        date_col = f"({e_col} + 1000 * end_zone_offset) / 86400000" if end_based \
-                  else f"({s_col} + 1000 * start_zone_offset) / 86400000"
+    # 1b. Interval table checks — local_date is always start-based
+    for table, s_col, e_col in interval_tables_to_check:
+        date_col = f"({s_col} + 1000 * start_zone_offset) / 86400000"
         bad = cur.execute(
             f"""SELECT COUNT(*) FROM {table}
                 WHERE local_date != {date_col}
@@ -153,7 +152,7 @@ def run_invariants(
         if bad:
             findings.append(
                 f"{table}: {bad} rows violate local_date formula "
-                f"(zone_offset in seconds, {'end' if end_based else 'start'}-based)"
+                f"(start_time + 1000 * start_zone_offset, start-based)"
             )
 
         # start_zone_offset bounds
@@ -191,7 +190,7 @@ def run_invariants(
             )
 
     # 2b. uuid uniqueness per interval table
-    for table, _, _, _ in interval_tables_to_check:
+    for table, _, _ in interval_tables_to_check:
         n, d = cur.execute(
             f"SELECT COUNT(*), COUNT(DISTINCT uuid) FROM {table}"
         ).fetchone()
@@ -212,15 +211,15 @@ def run_invariants(
                 f"{table}: client_record_id duplicates ({n} vs {d} distinct)"
             )
 
-    # 4. FK targets exist
+    # 4. FK targets exist — all tables in knowledge.TABLES registry
+    all_record_tables = [tbl[0] for tbl in kn.TABLES.values()]
     # Check app_info_id references
+    app_union_parts = " UNION ALL ".join(
+        f"SELECT app_info_id FROM {t}" for t in all_record_tables
+    )
     bad_app = cur.execute(
-        """SELECT COUNT(*) FROM (
-            SELECT app_info_id FROM weight_record_table
-            UNION ALL
-            SELECT app_info_id FROM body_fat_record_table
-            UNION ALL
-            SELECT app_info_id FROM lean_body_mass_record_table
+        f"""SELECT COUNT(*) FROM (
+            {app_union_parts}
           )
           WHERE app_info_id IS NOT NULL
             AND app_info_id NOT IN (SELECT row_id FROM application_info_table)"""
@@ -231,13 +230,12 @@ def run_invariants(
         )
 
     # Check device_info_id references
+    dev_union_parts = " UNION ALL ".join(
+        f"SELECT device_info_id FROM {t}" for t in all_record_tables
+    )
     bad_dev = cur.execute(
-        """SELECT COUNT(*) FROM (
-            SELECT device_info_id FROM weight_record_table
-            UNION ALL
-            SELECT device_info_id FROM body_fat_record_table
-            UNION ALL
-            SELECT device_info_id FROM lean_body_mass_record_table
+        f"""SELECT COUNT(*) FROM (
+            {dev_union_parts}
           )
           WHERE device_info_id IS NOT NULL
             AND device_info_id NOT IN (SELECT row_id FROM device_info_table)"""
@@ -287,7 +285,7 @@ def run_invariants(
                 )
 
     # 7. activity_date coverage for interval tables
-    for table, _, _, _ in interval_tables_to_check:
+    for table, _, _ in interval_tables_to_check:
         rt_id = _INTERVAL_TYPE_IDS.get(table)
         if rt_id is None:
             continue

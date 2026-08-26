@@ -457,8 +457,8 @@ def _insert_sleep(conn, app_id, device_id, start_dt_utc, end_dt_utc, stages=None
     e_ms = _epoch_ms(end_dt_utc)
     s_off = _warsaw_offset(start_dt_utc)
     e_off = _warsaw_offset(end_dt_utc)
-    # HC uses end-based local_date for sleep sessions
-    local_date = kn.local_date_epoch_days(e_ms, e_off)
+    # HC canonical recomputed form uses START-based local_date (PoC E.6, hc-internals.md §4.4)
+    local_date = kn.local_date_epoch_days(s_ms, s_off)
     dh = _dedupe_interval(app_id, device_id, s_ms, e_ms)
     uuid = _uuid("sleep", s_ms, e_ms)
     cur = conn.execute(
@@ -787,9 +787,9 @@ def build(path: str) -> None:
     for d_start in [d1_start, d2_start, d3_start, d4_start, d5_start, d6_start]:
         _add_activity_date(1, d_start)  # steps
 
-    # Sleep dates
-    _add_activity_date(38, s1_end)
-    _add_activity_date(38, s2_end)
+    # Sleep dates (start-based local_date)
+    _add_activity_date(38, s1_start)
+    _add_activity_date(38, s2_start)
 
     # Heart rate dates
     _add_activity_date(11, hr_start)

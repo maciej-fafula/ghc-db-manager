@@ -31,7 +31,14 @@
 `ghc-db-manager` edits an Android Health Connect export database to add historical
 records from Libra, Zepp, or any CSV export, then re-imports it on the phone via
 Health Connect's built-in restore.  No ADB needed.  No phone connection needed.
-All work is local and offline.
+
+The tool itself — parsing, merging, database editing, and ZIP packing — runs **entirely
+locally** on your laptop.  The documented workflow for moving data between phone and
+laptop uses cloud storage as an intermediary, because Health Connect's scheduled
+export writes only to a cloud provider app (Google Drive, etc.), and the import picker
+is a Storage Access Framework (SAF) document picker that accepts files from any
+source: cloud or local.  The Drive path is verified by the project; local document
+provider paths are plausible but untested.
 
 ---
 
@@ -52,6 +59,24 @@ The tool:
 
 Backfills are **indistinguishable from app data** in HC — they carry the
 attribution of the source app and appear alongside live recordings.
+
+---
+
+## Data Flow
+
+The documented laptop↔phone workflow uses cloud storage as an intermediary.
+All tool processing (inspect, plan, build, pack) stays local on the laptop.
+
+```
+phone → cloud storage (scheduled export, Drive etc.)
+      → laptop: ghc-db-manager processes locally
+      → cloud storage (output ZIP placed for phone access)
+      → phone: SAF import picker → Health Connect
+```
+
+HC has **no on-demand export** — the export is scheduled only (daily/weekly/monthly
+in HC settings).  The import side uses a SAF document picker; the project's own
+evidence is a ZIP manually placed on Google Drive and imported successfully.
 
 ---
 
@@ -146,8 +171,14 @@ Use `--no-allow-growth` to flag any new records as unexpected.
 
 ## Safety
 
-- **Personal data stays local.**  The tool runs entirely offline.  No network
-  calls, no telemetry, no third-party services.
+- **All tool processing is local.**  The `ghc-db-manager` tool itself makes no network
+  calls, has no telemetry, and calls no third-party services.  Parsing, merging,
+  database editing, and ZIP packing happen entirely on your laptop.
+
+- **The documented workflow transits cloud storage.**  HC's scheduled export writes
+  to a cloud provider app; the output ZIP is placed where the phone can reach it
+  (Drive or equivalent).  The import step uses a SAF picker that accepts any
+  document source.
 
 - **Source database is read-only.**  All operations work on a copy.  The
   original export is never modified.

@@ -299,8 +299,8 @@ def parse_sleep(path: str) -> list[IntervalRecord]:
             s_off = zone_offset_seconds(s_dt, TZ)
             e_off = zone_offset_seconds(e_dt, TZ)
 
-            # Sleep sessions: local_date is end-based (HC empirically uses end instant)
-            local_date = kn.local_date_epoch_days(int(e_dt.timestamp() * 1000), e_off)
+            # Sleep sessions: local_date is START-based (HC canonical recomputed form, per PoC E.6)
+            local_date = kn.local_date_epoch_days(int(s_dt.timestamp() * 1000), s_off)
 
             raw_fields = {k: v.strip() for k, v in row.items()}
 

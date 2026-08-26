@@ -73,13 +73,6 @@ class TestValidateRecord(unittest.TestCase):
         with self.assertRaises(RecordError):
             _validate_record(rec)
 
-    def test_negative_value_raises(self):
-        """value <= 0 should raise RecordError."""
-        rec = _canonical("weight", 75.0)
-        rec.value = -1.0
-        with self.assertRaises(RecordError):
-            _validate_record(rec)
-
     def test_poison_ms_offset_raises(self):
         """ms offset that looks like zone_offset in ms should raise RecordError."""
         # 7200000 ms = 2 hours = exactly the kind of bug poison.json tests for
