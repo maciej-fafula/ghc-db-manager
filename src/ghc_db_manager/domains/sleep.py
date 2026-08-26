@@ -55,7 +55,7 @@ def build_sleep_canonical(
     sleep_records: list[IntervalRecord],
     sleep_minute_records: list[IntervalRecord],
     *,
-    cutoffs: Optional[dict[str, int]] = None,
+    cutoffs: dict[str, int | None] | None = None,
 ) -> tuple[list[SleepCanonicalRecord], dict[str, int]]:
     """
     Build canonical sleep records from SLEEP sessions and SLEEP_MINUTE stages.
@@ -77,18 +77,32 @@ def build_sleep_canonical(
     if cutoffs is None:
         cutoffs = {}
 
-    # Build a map: wake_date_str → list of (start_ms, end_ms, stage_id)
+    # GAP-8 fix: stages_by_wake_date was using dict assignment (later file overwrites
+    # earlier). Now accumulate/merge: extend list and dedupe by (start_ms, stage).
     stages_by_wake_date: dict[str, list[tuple[int, int, int]]] = {}
     for rec in sleep_minute_records:
         wake_date_str = rec.raw.get("wake_date", "")
         if wake_date_str and rec.stages:
-            stages_by_wake_date[wake_date_str] = rec.stages
+            if wake_date_str not in stages_by_wake_date:
+                stages_by_wake_date[wake_date_str] = []
+            # Extend with stages from this file
+            for stage_tuple in rec.stages:
+                stages_by_wake_date[wake_date_str].append(stage_tuple)
+    # Dedupe by (start_ms, stage) keeping first
+    for wake_date_str in stages_by_wake_date:
+        seen: dict[tuple, tuple] = {}
+        for st in stages_by_wake_date[wake_date_str]:
+            key = (st[0], st[2])  # (start_ms, stage_type)
+            if key not in seen:
+                seen[key] = st
+        stages_by_wake_date[wake_date_str] = list(seen.values())
 
     records: list[SleepCanonicalRecord] = []
     stats: dict[str, int] = {
         "sessions": 0,
         "sessions_with_stages": 0,
         "cutoff": 0,
+        "skipped_inverted": 0,  # source rows with stop <= start (Zepp export defect)
     }
 
     cutoff = cutoffs.get("sleep")
@@ -98,6 +112,13 @@ def build_sleep_canonical(
         e_dt = rec.end_utc
         s_ms = rec.start_ms()
         e_ms = rec.end_ms()
+
+        # Zepp export defect (real data 2026-08 audit): some rows have
+        # stop = start - 60s (e.g. 22:00:00 → 21:59:00). Skip with a stat
+        # instead of crashing the build or importing garbage intervals.
+        if s_ms >= e_ms:
+            stats["skipped_inverted"] += 1
+            continue
 
         # Check cutoff
         if cutoff is not None and s_ms >= cutoff:

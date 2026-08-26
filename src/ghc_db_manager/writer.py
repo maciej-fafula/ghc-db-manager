@@ -151,7 +151,9 @@ def write_canonical(
             value_db = rec.value  # percent
 
         # Insert the record (OR IGNORE for idempotency: dedupe_hash/uuid uniqueness)
-        conn.execute(
+        # GAP-10 fix: use cur.rowcount to count ACTUAL inserts, not attempts.
+        # INSERT OR IGNORE skips duplicates — only count if a row was actually inserted.
+        cur = conn.execute(
             f"""INSERT OR IGNORE INTO {table_name}
                (uuid, last_modified_time, client_record_id, client_record_version,
                 device_info_id, app_info_id, recording_method, dedupe_hash,
@@ -172,7 +174,9 @@ def write_canonical(
                 value_db,
             ),
         )
-        inserted[rec.kind] = inserted.get(rec.kind, 0) + 1
+        # cur.rowcount is 1 if a row was inserted, 0 if ignored as duplicate
+        if cur.rowcount > 0:
+            inserted[rec.kind] = inserted.get(rec.kind, 0) + 1
 
         # Track activity_date population
         activity_dates.add((rec.local_date, record_type_id))

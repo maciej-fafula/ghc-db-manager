@@ -8,6 +8,7 @@ FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
 MINI_ZEPP_DIR = FIXTURES_DIR / "mini-zepp"
 sys.path.insert(0, str(FIXTURES_DIR.parent.parent / "src"))
 
+from ghc_db_manager.sources import zepp
 from ghc_db_manager.sources.zepp import parse_body
 
 
@@ -87,3 +88,37 @@ class TestZeppAdapter(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTimestampSuffixedFilenames(unittest.TestCase):
+    """Regression: real Zepp exports suffix filenames with timestamps
+    (BODY_1787404253776.csv); v0.1.1 dispatch matched exact stems only and
+    silently returned [] for every real export file (found by real-data audit
+    2026-08-26; fixtures used bare names and masked the bug)."""
+
+    def test_body_with_timestamp_suffix_parses(self):
+        import shutil, tempfile
+        with tempfile.TemporaryDirectory() as td:
+            dst = pathlib.Path(td) / "BODY_1787404253776.csv"
+            shutil.copyfile(pathlib.Path(__file__).parent / "fixtures" / "mini-zepp" / "BODY.csv", dst)
+            recs = zepp.load_zepp(str(dst))
+            self.assertGreater(len(recs), 0)
+
+    def test_directory_with_suffixed_files_parses(self):
+        import shutil, tempfile
+        with tempfile.TemporaryDirectory() as td:
+            src = pathlib.Path(__file__).parent / "fixtures" / "mini-zepp"
+            for f in src.glob("*.csv"):
+                shutil.copyfile(f, pathlib.Path(td) / f"{f.stem}_1787404253776.csv")
+            recs = zepp.load_zepp(td)
+            kinds = {r.kind for r in recs}
+            self.assertIn("weight", kinds)          # BODY
+            self.assertIn("sleep", kinds)           # SLEEP
+            self.assertIn("exercise", kinds)        # SPORT
+
+    def test_activity_minute_skipped(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = pathlib.Path(td) / "ACTIVITY_MINUTE_123.csv"
+            p.write_text("date,time,steps\n2026-01-01,10:00,5\n", encoding="utf-8")
+            self.assertEqual(zepp.load_zepp(str(p)), [])

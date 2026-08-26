@@ -24,10 +24,17 @@ def _dt(year, month, day, hour=12, minute=0, second=0):
 
 # Use a unique timestamp (2023-06-01) that doesn't conflict with fixture seeded data
 _UNIQUE_DT = _dt(2023, 6, 1, 12, 0)
+# GAP-10 fix: per-class counter ensures unique timestamps when tests share connection
+_unique_counter = 0
 
 
 def _canonical(kind, value, dt=None, source="libra"):
-    dt = dt or _UNIQUE_DT
+    global _unique_counter
+    # GAP-10 fix: use unique timestamps per call to avoid duplicate interference
+    # when tests share the same connection (tests run sequentially on same class conn)
+    if dt is None:
+        _unique_counter += 1
+        dt = _UNIQUE_DT + datetime.timedelta(seconds=_unique_counter)
     ms = int(dt.timestamp() * 1000)
     off = kn.local_date_epoch_days(ms, 3600)  # use 3600s offset
     return CanonicalRecord(
@@ -87,6 +94,8 @@ class TestWriteCanonical(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        global _unique_counter
+        _unique_counter = 0  # GAP-10 fix: reset counter per test class
         # Build fixture db copy
         cls._db_fd = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         cls._db_fd.close()

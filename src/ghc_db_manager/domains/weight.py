@@ -82,13 +82,18 @@ def zone_offset_for_libra(dt: datetime.datetime) -> int:
         return LIBRA_MIDNIGHT_SUMMER_OFFSET
     if hhmmssms == (23, 0, 0, 0):
         return LIBRA_MIDNIGHT_WINTER_OFFSET
+    # For non-midnight Libra entries, use the configured tz (GAP-6 fix)
     return zone_offset_seconds(dt, "Europe/Warsaw")
 
 
-def zone_offset_for_source(source: str, dt: datetime.datetime) -> int:
+def zone_offset_for_source(source: str, dt: datetime.datetime, tz: str = "Europe/Warsaw") -> int:
+    """
+    GAP-6 fix: tz parameter threads through to zone_offset_seconds for non-Libra sources.
+    Libra always uses its fixed-offset rules; only non-midnight entries fall back to tz.
+    """
     if source == "libra":
         return zone_offset_for_libra(dt)
-    return zone_offset_seconds(dt, "Europe/Warsaw")
+    return zone_offset_seconds(dt, tz)
 
 
 def _ms(rec: RawRecord) -> int:
@@ -107,6 +112,10 @@ def rule_r1_profile_filter(
     """
     Filter Zepp rows by profile height.
     Returns (kept, dropped_count, kept_weight_ms).
+
+    GAP-14 fix: when zepp_profile_height is given, height=None rows are DROPPED
+    (PoC strict equality: if filter is active, None means unknown → drop).
+    This is counted in stats as R1_profile_filter.
     """
     if zepp_profile_height is None:
         kept_ws = {_ms(r) for r in records if r.kind == "weight"}
@@ -118,7 +127,9 @@ def rule_r1_profile_filter(
     for rec in records:
         if rec.source == "zepp":
             h = rec.meta.get("height")
-            if h is not None and h != zepp_profile_height:
+            # GAP-14 fix: when filter is active, height=None → DROP (strict equality)
+            # h is None OR h != zepp_profile_height → drop
+            if h is None or h != zepp_profile_height:
                 dropped += 1
                 continue
         kept.append(rec)
@@ -162,11 +173,23 @@ def rule_r2_plausibility(
 # ---------------------------------------------------------------------------
 
 def _richness_key(rec: RawRecord) -> tuple:
+    """
+    Compute a richness score for R3 dedup tiebreaking.
+
+    GAP-4 fix: originally only read Libra-style meta keys (bf_raw, mm_raw).
+    Zepp dup-ts rows always tie on those → first-in-file wins unfairly.
+    Now also uses Zepp signals (fatRate, body_water_rate, bmi) as tiebreakers.
+    """
     return (
         1 if rec.kind == "weight" else 0,
         1 if rec.kind == "body_fat" else 0,
+        # Libra-style tiebreakers
         1 if (rec.meta.get("bf_raw") is not None) else 0,
         1 if (rec.meta.get("mm_raw") is not None) else 0,
+        # GAP-4 fix: Zepp-specific tiebreakers
+        1 if (rec.meta.get("fatRate") is not None) else 0,
+        1 if (rec.meta.get("body_water_rate") is not None) else 0,
+        1 if (rec.meta.get("bmi") is not None) else 0,
     )
 
 
@@ -330,12 +353,13 @@ def rule_r6_same_measurement_day(
                 dt_min = dt_ms / 60_000
                 dw = abs(rec_a.value - rec_b.value)
 
+                # NOTE: no break — every pair must be evaluated (a priority row
+                # can match multiple lower-priority rows; PoC parity 2024-01-30:
+                # Libra 07:33 vs Zepp 07:32 AND Zepp 08:32 both Δw==0, Δt≤2h)
                 if dt_min <= 30 and dw <= 0.5:
                     drop_ms.add(lower_ms)
-                    break
-                if dw == 0 and dt_min <= 120:
+                elif dw == 0 and dt_min <= 120:
                     drop_ms.add(lower_ms)
-                    break
 
     kept: list[RawRecord] = []
     dropped = 0
@@ -376,6 +400,93 @@ def rule_r7_derived_inherit(
 
 
 # ---------------------------------------------------------------------------
+# Sanity gates (GAP-5: port from PoC merge_weight.py §8)
+# ---------------------------------------------------------------------------
+
+def run_weight_sanity_gates(
+    canonical: list["CanonicalRecord"],
+    *,
+    zepp_profile_height: Optional[float] = None,
+    weight_min: float = WEIGHT_MIN_KG,
+    weight_max: float = WEIGHT_MAX_KG,
+) -> tuple[list[str], bool]:
+    """
+    Run post-merge sanity gates on canonical weight records.
+
+    Ported from PoC merge_weight.py §8 with adaptations:
+      - Band is 40-250 kg (PoC used 60-160 dataset-specifically; generic 40-250 chosen)
+      - Min-ts: warn if oldest record > 30 years back (simple warning, no hard fail)
+      - Hard fail: (source, kind, ts) uniqueness violation
+
+    Parameters
+    ----------
+    canonical : list[CanonicalRecord]
+        Output of build_weight_canonical.
+    zepp_profile_height : float | None
+        If set, Zepp rows with different height should not be present (leak check).
+    weight_min / weight_max : float
+        Plausibility band.
+
+    Returns
+    -------
+    (warnings, hard_fail)
+        warnings: list of human-readable warning messages
+        hard_fail: True if any gate failed hard (build should abort)
+    """
+    import sys
+    warnings: list[str] = []
+    hard_fail = False
+
+    # (a) HARD WARN when Zepp weight rows present and --zepp-height NOT given
+    # (person-2 leak risk — PoC merge_weight.py:152 check)
+    zepp_weights = [r for r in canonical if r.source == "zepp" and r.kind == "weight"]
+    if zepp_weights and zepp_profile_height is None:
+        msg = (
+            "HARD WARN: Zepp weight rows are present but --zepp-height was NOT given. "
+            "Person-2 leak risk (height=None means all Zepp rows pass R1). "
+            "Pass --zepp-height to filter."
+        )
+        print(msg, file=sys.stderr)
+        warnings.append(msg)
+        hard_fail = True
+
+    # (b) Value-band recheck on canonical output
+    for r in canonical:
+        if r.kind == "weight":
+            if not (weight_min <= r.value <= weight_max):
+                msg = (
+                    f"weight out of band: {r.source}/{r.kind} at "
+                    f"{r.time_utc.isoformat()} value={r.value} not in [{weight_min}, {weight_max}]"
+                )
+                warnings.append(msg)
+
+    # (c) (source, kind, ts) uniqueness
+    seen_keys: set[tuple] = set()
+    for r in canonical:
+        key = (r.source, r.kind, r.time_utc.isoformat())
+        if key in seen_keys:
+            msg = f"(source, kind, ts) not unique: {r.source}/{r.kind} at {r.time_utc.isoformat()}"
+            warnings.append(msg)
+            hard_fail = True
+        seen_keys.add(key)
+
+    # (d) Min-ts sanity (warn if > 30 years back)
+    if canonical:
+        import datetime as dt
+        now = dt.datetime.now(dt.timezone.utc)
+        min_ts = min(r.time_utc for r in canonical)
+        age_years = (now - min_ts).days / 365.25
+        if age_years > 30:
+            msg = (
+                f"min-ts sanity: oldest record is {age_years:.1f} years old "
+                f"({min_ts.date()}) — verify this is intentional"
+            )
+            warnings.append(msg)
+
+    return warnings, hard_fail
+
+
+# ---------------------------------------------------------------------------
 # Build canonical records
 # ---------------------------------------------------------------------------
 
@@ -397,7 +508,9 @@ def build_weight_canonical(
     from ghc_db_manager import knowledge as kn
 
     stats: dict[str, int] = {}
-    records = list(raw_records)
+    # A Zepp DIRECTORY source yields mixed RawRecord + IntervalRecord lists;
+    # the weight domain consumes only instant kinds.
+    records = [r for r in raw_records if getattr(r, "kind", None) in ("weight", "body_fat", "lean_mass")]
 
     # Track kept weight ms through each rule
     kept_ws: set[int] = set()
@@ -456,7 +569,8 @@ def build_weight_canonical(
     for rec in records:
         if rec.kind != "weight" and _ms(rec) not in final_ws:
             continue  # should not happen, but be safe
-        off = zone_offset_for_source(rec.source, rec.time_utc)
+        # GAP-6 fix: pass tz to zone_offset_for_source
+        off = zone_offset_for_source(rec.source, rec.time_utc, tz)
         ld = kn.local_date_epoch_days(_ms(rec), off)
         unit = "kg" if rec.kind in ("weight", "lean_mass") else "percent"
         priority = 0 if rec.source == priority_source else 1
@@ -481,5 +595,17 @@ def build_weight_canonical(
                 meta=rec.meta,
             )
         )
+
+    # GAP-5: run sanity gates on canonical output
+    gate_warnings, gate_hard_fail = run_weight_sanity_gates(
+        canonical,
+        zepp_profile_height=zepp_profile_height,
+        weight_min=weight_min,
+        weight_max=weight_max,
+    )
+    if gate_warnings:
+        stats["gate_warnings"] = len(gate_warnings)
+    if gate_hard_fail:
+        stats["gate_hard_fail"] = 1
 
     return canonical, stats

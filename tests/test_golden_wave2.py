@@ -108,6 +108,7 @@ class TestGoldenWave2(unittest.TestCase):
         """Full pipeline should produce expected record counts per domain."""
         # Read cutoffs from fixture db
         conn_ref = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        # GAP-3 fix: use None instead of 0 when MIN(start_time) is NULL (empty table)
         cutoffs = {}
         for domain, table in [
             ("steps", "steps_record_table"),
@@ -119,9 +120,9 @@ class TestGoldenWave2(unittest.TestCase):
         ]:
             try:
                 row = conn_ref.execute(f"SELECT MIN(start_time) FROM {table}").fetchone()
-                cutoffs[domain] = row[0] if row and row[0] else 0
+                cutoffs[domain] = row[0] if row and row[0] is not None else None
             except Exception:
-                cutoffs[domain] = 0
+                cutoffs[domain] = None
         conn_ref.close()
 
         records_by_domain = _build_full(self.sources, self.db_path)

@@ -47,7 +47,7 @@ def build_heartrate_canonical(
     hr_auto_records: list[IntervalRecord],
     hr_manual_records: list[IntervalRecord],
     *,
-    cutoffs: Optional[dict[str, int]] = None,
+    cutoffs: dict[str, int | None] | None = None,
 ) -> tuple[list[HeartRateCanonicalRecord], dict[str, int]]:
     """
     Build canonical heart-rate records.
@@ -79,9 +79,14 @@ def build_heartrate_canonical(
 
     cutoff = cutoffs.get("heart_rate")
 
+    # GAP-2 fix: hr_auto cutoff is END-based (last sample ≥ cutoff → skip).
+    # PoC build_wave2.py:104: `if samples[-1][0] >= cutoff: continue`
+    # Manual HR stays start-based (single sample at start_ts).
+
     # hr_auto
     for rec in hr_auto_records:
-        if cutoff is not None and rec.start_ms() >= cutoff:
+        # GAP-2 fix: use end_ms (last sample) instead of start_ms for cutoff
+        if cutoff is not None and rec.end_ms() >= cutoff:
             stats["cutoff_auto"] += 1
             continue
 
@@ -98,7 +103,7 @@ def build_heartrate_canonical(
         ))
         stats["hr_auto"] += 1
 
-    # hr_manual (already deduped in parse_hr_manual)
+    # hr_manual (already deduped in parse_hr_manual) — start-based (single sample)
     for rec in hr_manual_records:
         if cutoff is not None and rec.start_ms() >= cutoff:
             stats["cutoff_manual"] += 1

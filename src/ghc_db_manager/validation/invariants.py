@@ -68,6 +68,7 @@ def run_invariants(
     conn: Union[sqlite3.Connection, "WriteGuard"],
     expected_domains: Optional[list[str]] = None,
     source_db_path: Optional[str] = None,
+    build_last_modified_ms: Optional[int] = None,
 ) -> tuple[bool, list[str]]:
     """
     Run all pre-import invariants on a (WriteGuard-wrapped) DB connection.
@@ -83,6 +84,10 @@ def run_invariants(
         Path to the original source DB (before modification).  Used to verify
         do-not-touch tables are unchanged and to compute row-count deltas.
         If None, the do-not-touch table check and delta checks are skipped.
+    build_last_modified_ms : int | None
+        The pinned last_modified_time used by this build's writer.  When
+        given, activity_date coverage checks are scoped to rows inserted by
+        THIS build (real dbs contain pre-existing rows without coverage).
 
     Returns
     -------
@@ -256,6 +261,11 @@ def run_invariants(
         findings.append(f"PRAGMA foreign_key_check: {fk_results[:3]}")
 
     # 7. activity_date coverage for every inserted record
+    # Scoped to rows inserted by THIS build when build_last_modified_ms is given:
+    # real phone dbs contain pre-existing rows without coverage (native data);
+    # PoC scoped its checks the same way via last_modified_time pinning.
+    scope_w = "AND t.last_modified_time = ?" if build_last_modified_ms is not None else ""
+    scope_p = (build_last_modified_ms,) if build_last_modified_ms is not None else ()
     if "weight" in expected_domains:
         for table, time_col, _ in tables_to_check:
             # Map table to record_type_id
@@ -271,12 +281,13 @@ def run_invariants(
             missing = cur.execute(
                 f"""SELECT COUNT(*) FROM {table} t
                     WHERE t.app_info_id IS NOT NULL
+                      {scope_w}
                       AND NOT EXISTS (
                           SELECT 1 FROM activity_date_table a
                           WHERE a.epoch_days = t.local_date
                             AND a.record_type_id = ?
                       )""",
-                (rt_id,),
+                scope_p + (rt_id,),
             ).fetchone()[0]
             if missing:
                 findings.append(
@@ -293,12 +304,13 @@ def run_invariants(
         missing = cur.execute(
             f"""SELECT COUNT(*) FROM {table} t
                 WHERE t.app_info_id IS NOT NULL
+                  {scope_w}
                   AND NOT EXISTS (
                       SELECT 1 FROM activity_date_table a
                       WHERE a.epoch_days = t.local_date
                         AND a.record_type_id = ?
                   )""",
-            (rt_id,),
+            scope_p + (rt_id,),
         ).fetchone()[0]
         if missing:
             findings.append(
@@ -328,6 +340,137 @@ def run_invariants(
                     pass
         finally:
             src_conn.close()
+
+    ok = len(findings) == 0
+    return ok, findings
+
+
+# ---------------------------------------------------------------------------
+# GAP-12 TODO (deferred — do NOT implement):
+# ---------------------------------------------------------------------------
+# The interval invariants above check ALL rows in the table. They should be
+# scoped to only the rows inserted by THIS build (identified by now_ms and
+# app_info_id), not all rows including pre-existing ones.
+#
+# This matters for correctness: a pre-existing invariant violation in the
+# source db should NOT cause our build to fail.
+#
+# Implementation would require:
+#   1. Thread now_ms through from writer to invariants
+#   2. Add WHERE clause filtering to only "ours" rows
+#   3. Run checks only on the filtered subset
+#
+# This is deferred because the current checks happen to pass on our source dbs.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# GAP-7: Post-insert cutoff invariant
+# ---------------------------------------------------------------------------
+# Ported from PoC build_wave2.py:191-197.
+# For each interval table, no rows written by THIS build may exist at/after
+# that table's pre-existing cutoff (MIN(start_time) from source db).
+# We identify "ours" by rows with last_modified_time = now_ms and the domain's
+# app_info_id. If any of our rows extend to/after the cutoff, it means the
+# cutoff was violated (data at/after cutoff should NOT have been imported).
+# ---------------------------------------------------------------------------
+
+def run_post_insert_cutoff_invariants(
+    conn: Union[sqlite3.Connection, "WriteGuard"],
+    expected_domains: list[str],
+    app_info_ids: dict[str, int],
+    now_ms: int,
+    source_db_path: Optional[str] = None,
+) -> tuple[bool, list[str]]:
+    """
+    Run post-insert cutoff invariants: rows inserted by this build must NOT
+    exist at/after the pre-existing cutoff for their table.
+
+    Ported from PoC build_wave2.py:191-197.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection | WriteGuard
+        Connection to the modified database (working copy).
+    expected_domains : list[str]
+        Domains that were written (e.g. ["activity", "sleep", "heartrate", "exercise"]).
+    app_info_ids : dict[str, int]
+        Map of domain → app_info_id used for this build's rows.
+    now_ms : int
+        last_modified_time used for all rows written by this build.
+    source_db_path : str | None
+        Path to original source DB to read cutoffs from.
+        If None, cutoff check is skipped.
+
+    Returns
+    -------
+    (ok, findings)
+    """
+    if source_db_path is None:
+        return True, []
+
+    findings: list[str] = []
+    cur = conn.cursor()
+
+    # Map domain → table info
+    # weight is instant-domain, handled separately in run_invariants
+    domain_table_map: dict[str, tuple[str, str]] = {
+        "activity": ("steps_record_table", "start_time"),
+        "sleep": ("sleep_session_record_table", "start_time"),
+        "heartrate": ("heart_rate_record_table", "start_time"),
+        "exercise": ("exercise_session_record_table", "start_time"),
+    }
+
+    # Get cutoffs from source db
+    src_conn = open_readonly(source_db_path)
+    try:
+        cutoffs: dict[str, int | None] = {}
+        for domain, (table, time_col) in domain_table_map.items():
+            if domain not in expected_domains:
+                continue
+            try:
+                row = src_conn.execute(f"SELECT MIN({time_col}) FROM {table}").fetchone()
+                cutoffs[domain] = row[0] if row and row[0] is not None else None
+            except sqlite3.OperationalError:
+                cutoffs[domain] = None
+    finally:
+        src_conn.close()
+
+    for domain in expected_domains:
+        if domain not in domain_table_map:
+            continue
+        table, time_col = domain_table_map[domain]
+        cutoff = cutoffs.get(domain)
+        if cutoff is None:
+            continue  # table empty or doesn't exist → no cutoff
+
+        app_id = app_info_ids.get(domain)
+        if app_id is None:
+            continue
+
+        # Count our rows at/after cutoff
+        ours_after = cur.execute(
+            f"""SELECT COUNT(*) FROM {table}
+                WHERE app_info_id = ? AND {time_col} >= ?""",
+            (app_id, cutoff),
+        ).fetchone()[0]
+
+        # Count pre-existing rows at/after cutoff (before our build)
+        src_conn = open_readonly(source_db_path)
+        try:
+            pre_existing_after = src_conn.execute(
+                f"""SELECT COUNT(*) FROM {table}
+                    WHERE app_info_id = ? AND {time_col} >= ?""",
+                (app_id, cutoff),
+            ).fetchone()[0]
+        finally:
+            src_conn.close()
+
+        if ours_after != pre_existing_after:
+            findings.append(
+                f"{table}: {ours_after} of our rows at/after cutoff ({cutoff}) "
+                f"vs {pre_existing_after} pre-existing — cutoff was violated"
+            )
 
     ok = len(findings) == 0
     return ok, findings

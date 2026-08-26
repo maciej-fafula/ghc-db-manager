@@ -51,7 +51,7 @@ class ExerciseCanonicalRecord:
 def build_exercise_canonical(
     exercise_records: list[IntervalRecord],
     *,
-    cutoffs: Optional[dict[str, int]] = None,
+    cutoffs: dict[str, int | None] | None = None,
 ) -> tuple[list[ExerciseCanonicalRecord], dict[str, int]]:
     """
     Build canonical exercise records from SPORT data.

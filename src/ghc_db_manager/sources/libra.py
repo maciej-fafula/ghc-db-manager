@@ -130,7 +130,7 @@ def parse(path: str) -> list[RawRecord]:
             "is_local_midnight": _is_local_midnight(dt),
         }
 
-        raw_fields = {k: v.strip() for k, v in row.items()}
+        raw_fields = {k: (v.strip() if isinstance(v, str) else str(v)) for k, v in row.items() if k is not None}
 
         # Weight record — always emitted
         records.append(

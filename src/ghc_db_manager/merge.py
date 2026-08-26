@@ -38,12 +38,14 @@ def load_hc_weight_rows(
     ]
 
 
-def get_cutoffs_from_db(db_path: str) -> dict[str, int]:
+def get_cutoffs_from_db(db_path: str) -> dict[str, int | None]:
     """
     Read per-table MIN(start_time) cutoffs from a read-only HC export db.
 
-    Returns dict mapping domain name → cutoff_ms.
+    Returns dict mapping domain name → cutoff_ms (int) or None.
+    None means the table is empty → import ALL history (no cutoff).
     For tables that don't exist or have no rows, value is None.
+    For tables with existing rows, value is MIN(start_time) in ms.
     """
     interval_tables = [
         ("steps",     "steps_record_table"),
@@ -56,13 +58,16 @@ def get_cutoffs_from_db(db_path: str) -> dict[str, int]:
 
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-        cutoffs: dict[str, int] = {}
+        cutoffs: dict[str, int | None] = {}
         for domain, table in interval_tables:
             try:
                 row = conn.execute(f"SELECT MIN(start_time) FROM {table}").fetchone()
-                cutoffs[domain] = row[0] if row and row[0] is not None else 0
+                # GAP-3 fix: MIN(start_time) is NULL when table is empty.
+                # Use None (no cutoff = import all history) instead of 0.
+                # 0 as cutoff would incorrectly drop ALL records (since all start_ms > 0).
+                cutoffs[domain] = row[0] if row and row[0] is not None else None
             except sqlite3.OperationalError:
-                cutoffs[domain] = 0
+                cutoffs[domain] = None
         return cutoffs
     finally:
         conn.close()
@@ -106,7 +111,7 @@ def merge(
     (canonical_records, rule_stats)
     """
     # Get cutoffs from db if available
-    cutoffs: dict[str, int] = {}
+    cutoffs: dict[str, int | None] = {}
     if hc_db_path is not None:
         cutoffs = get_cutoffs_from_db(hc_db_path)
 
@@ -114,13 +119,13 @@ def merge(
         return _merge_weight(sources, zepp_profile_height, weight_min, weight_max,
                              hc_db_path, priority_source, tz)
     elif domain == "activity":
-        return _merge_activity(sources, cutoffs)
+        return _merge_activity(sources, cutoffs, tz)
     elif domain == "sleep":
-        return _merge_sleep(sources, cutoffs)
+        return _merge_sleep(sources, cutoffs, tz)
     elif domain == "heartrate":
-        return _merge_heartrate(sources, cutoffs)
+        return _merge_heartrate(sources, cutoffs, tz)
     elif domain == "exercise":
-        return _merge_exercise(sources, cutoffs)
+        return _merge_exercise(sources, cutoffs, tz)
     else:
         raise NotImplementedError(f"Domain {domain!r} not implemented yet")
 
@@ -141,7 +146,8 @@ def _merge_weight(
 
     all_raw: list = []
     for name, path in sources.items():
-        records = load_source(name, path)
+        # GAP-6 fix: thread tz to load_source
+        records = load_source(name, path, tz)
         all_raw.extend(records)
 
     canonical, stats = build_weight_canonical(
@@ -158,12 +164,14 @@ def _merge_weight(
 
 def _merge_activity(
     sources: dict[str, str],
-    cutoffs: dict[str, int],
+    cutoffs: dict[str, int | None],
+    tz: str,
 ) -> tuple[list[ActivityCanonicalRecord], dict[str, int]]:
     """Activity-domain merge."""
     all_records: list[IntervalRecord] = []
     for name, path in sources.items():
-        records = load_source(name, path)
+        # GAP-6 fix: thread tz to load_source
+        records = load_source(name, path, tz)
         for r in records:
             if isinstance(r, IntervalRecord) and r.kind in ("steps", "distance", "calories"):
                 all_records.append(r)
@@ -180,14 +188,16 @@ def _merge_activity(
 
 def _merge_sleep(
     sources: dict[str, str],
-    cutoffs: dict[str, int],
+    cutoffs: dict[str, int | None],
+    tz: str,
 ) -> tuple[list[SleepCanonicalRecord], dict[str, int]]:
     """Sleep-domain merge."""
     sleep_records: list[IntervalRecord] = []
     sleep_minute_records: list[IntervalRecord] = []
 
     for name, path in sources.items():
-        records = load_source(name, path)
+        # GAP-6 fix: thread tz to load_source
+        records = load_source(name, path, tz)
         for r in records:
             if isinstance(r, IntervalRecord):
                 if r.kind == "sleep":
@@ -204,14 +214,16 @@ def _merge_sleep(
 
 def _merge_heartrate(
     sources: dict[str, str],
-    cutoffs: dict[str, int],
+    cutoffs: dict[str, int | None],
+    tz: str,
 ) -> tuple[list[HeartRateCanonicalRecord], dict[str, int]]:
     """Heart-rate-domain merge."""
     hr_auto_records: list[IntervalRecord] = []
     hr_manual_records: list[IntervalRecord] = []
 
     for name, path in sources.items():
-        records = load_source(name, path)
+        # GAP-6 fix: thread tz to load_source
+        records = load_source(name, path, tz)
         for r in records:
             if isinstance(r, IntervalRecord):
                 if r.kind == "hr_auto":
@@ -228,13 +240,15 @@ def _merge_heartrate(
 
 def _merge_exercise(
     sources: dict[str, str],
-    cutoffs: dict[str, int],
+    cutoffs: dict[str, int | None],
+    tz: str,
 ) -> tuple[list[ExerciseCanonicalRecord], dict[str, int]]:
     """Exercise-domain merge."""
     exercise_records: list[IntervalRecord] = []
 
     for name, path in sources.items():
-        records = load_source(name, path)
+        # GAP-6 fix: thread tz to load_source
+        records = load_source(name, path, tz)
         for r in records:
             if isinstance(r, IntervalRecord) and r.kind == "exercise":
                 exercise_records.append(r)

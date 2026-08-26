@@ -113,8 +113,8 @@ class RawRecord:
 # Adapter registry
 # ---------------------------------------------------------------------------
 
-# Adapter signature: (path: str) -> list[RawRecord | IntervalRecord]
-SourceAdapter = Callable[[str], list[RawRecord | IntervalRecord]]
+# Adapter signature: (path: str, tz: str | None = None) -> list[RawRecord | IntervalRecord]
+SourceAdapter = Callable[..., list[RawRecord | IntervalRecord]]
 
 ADAPTERS: dict[str, SourceAdapter] = {}
 
@@ -127,9 +127,12 @@ def get_adapter(name: str) -> SourceAdapter:
     return ADAPTERS[name.lower()]
 
 
-def load_source(name: str, path: str) -> list[RawRecord | IntervalRecord]:
+def load_source(name: str, path: str, tz: str | None = None) -> list[RawRecord | IntervalRecord]:
     """
     Load and parse ``path`` using the registered adapter for ``name``.
+
+    GAP-6 fix: accepts optional tz IANA timezone string, passed to adapters
+    that support it (zepp). Adapters that don't need tz (libra, generic) ignore it.
 
     Returns a list of RawRecord (instant measurements) and/or IntervalRecord
     (interval records).  Adapters are imported lazily on first use to avoid
@@ -148,4 +151,7 @@ def load_source(name: str, path: str) -> list[RawRecord | IntervalRecord]:
             f"No adapter registered for source {name!r}. "
             f"Registered sources: {sorted(ADAPTERS.keys())}"
         )
+    # GAP-6: pass tz to adapters that accept it
+    if tz is not None and name_lower == "zepp":
+        return adapter(path, tz)
     return adapter(path)

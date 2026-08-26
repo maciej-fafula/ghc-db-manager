@@ -47,7 +47,38 @@ from ghc_db_manager.writer import write_canonical, write_interval
 
 DEFAULT_TZ = "Europe/Warsaw"
 DEFAULT_PROJECT_KEY = "ghc-db-manager"
-DEFAULT_APP_INFO_ID = 5  # com.example.tracker (matches fixture)
+# Default attribution per domain, by PACKAGE NAME (never rowid — rowids are
+# unstable across exports; the v0.1.1 real-data audit caught DEFAULT_APP_INFO_ID=5
+# resolving to Google Fit on a real db while meaning the fixture app on fixtures).
+# These are the apps that PRODUCED the data (PoC decision); --attr overrides.
+ZEPP_PACKAGE = "com.huami.watch.hmwatchmanager"
+LIBRA_PACKAGE = "net.cachapa.libra"
+DEFAULT_ATTRS = {
+    "weight": LIBRA_PACKAGE,
+    "activity": ZEPP_PACKAGE,
+    "sleep": ZEPP_PACKAGE,
+    "heartrate": ZEPP_PACKAGE,
+    "exercise": ZEPP_PACKAGE,
+}
+
+
+def _resolve_attr_map(conn, domains, attrs):
+    """Resolve per-domain app_info_id from --attr overrides + source-derived
+    defaults. Raises with guidance if a package is missing from the db."""
+    out = {}
+    for domain in domains:
+        domain = domain.strip()
+        pkg = attrs.get(domain, DEFAULT_ATTRS.get(domain))
+        if pkg is None:
+            continue
+        try:
+            out[domain] = _resolve_app_id(conn, pkg)
+        except Exception as exc:
+            raise ValueError(
+                f"Attribution package {pkg!r} for domain {domain!r} not found in "
+                f"the export db; pass --attr {domain}=<installed package>"
+            ) from exc
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -159,15 +190,15 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     # Parse attribution
     attrs = _parse_attrs(args.attr)
-    app_info_id = DEFAULT_APP_INFO_ID
-    if "weight" in domains and "weight" in attrs:
-        # Resolve package name to app_info_id from the db
-        try:
-            conn_ref = open_readonly(args.db)
-            app_info_id = _resolve_app_id(conn_ref, attrs["weight"])
-            conn_ref.close()
-        except Exception as exc:
-            print(f"WARNING: could not resolve app package {attrs['weight']!r}: {exc}", file=sys.stderr)
+    app_info_id = None
+    conn_ref = open_readonly(args.db)
+    attr_map = _resolve_attr_map(conn_ref, domains, attrs)
+    conn_ref.close()
+    app_info_id = attr_map.get("weight")
+    if app_info_id is None and "weight" in domains:
+        raise ValueError(
+            "Weight attribution could not be resolved; pass --attr weight=<package>"
+        )
 
     print(f"Plan: db={args.db}")
     print(f"  sources : {sources}")
@@ -274,21 +305,19 @@ def _build_impl(
     zepp_height: float | None = float(args.zepp_height) if args.zepp_height else None
     attrs = _parse_attrs(args.attr)
 
-    # Resolve app_info_id
-    app_info_id = DEFAULT_APP_INFO_ID
-    if args.attr:
-        try:
-            conn_ref = open_readonly(args.db)
-            for domain in domains:
-                domain = domain.strip()
-                if domain in attrs:
-                    app_info_id = _resolve_app_id(conn_ref, attrs[domain])
-                    break
-            conn_ref.close()
-        except Exception as exc:
-            print(f"WARNING: resolving app package: {exc}", file=sys.stderr)
+    # Resolve per-domain app_info_id (source-derived defaults, --attr overrides)
+    conn_ref = open_readonly(args.db)
+    try:
+        attr_map = _resolve_attr_map(conn_ref, domains, attrs)
+    finally:
+        conn_ref.close()
+    app_info_id = attr_map.get("weight")
 
     project_key = DEFAULT_PROJECT_KEY
+
+    # One pinned last_modified_time for the whole build: deterministic reruns,
+    # and invariants can scope coverage checks to rows THIS build inserted.
+    build_now_ms = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
 
     # Copy source db → working copy
     db_copy = out_prefix.with_suffix(".db")
@@ -345,8 +374,9 @@ def _build_impl(
                 inserted = write_canonical(
                     conn,
                     records,
-                    app_info_id,
+                    attr_map["weight"],
                     project_key,
+                    now_ms=build_now_ms,
                 )
                 for kind, n in inserted.items():
                     if n > 0:
@@ -389,8 +419,9 @@ def _build_impl(
                 inserted = write_interval(
                     conn,
                     records,
-                    app_info_id,
+                    attr_map[domain],
                     project_key,
+                    now_ms=build_now_ms,
                 )
                 for kind, n in inserted.items():
                     if n > 0:
@@ -424,6 +455,7 @@ def _build_impl(
                 "weight", "activity", "sleep", "heartrate", "exercise"
             )],
             source_db_path=args.db,
+            build_last_modified_ms=build_now_ms,
         )
         src_ref.close()
     except Exception as exc:
@@ -483,7 +515,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
     ``ghcdb validate <modified.db>``
 
     Run pre-import invariants on a modified DB.
+
+    GAP-13 fix: added --domains flag (default "weight" for backwards compat).
     """
+    domains = (args.domains or "weight").split(",")
+
     try:
         conn = sqlite3.connect(args.db)
     except Exception as exc:
@@ -491,7 +527,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         return 1
 
     print(f"Validating: {args.db}")
-    ok, findings = run_invariants(conn, expected_domains=["weight"])
+    ok, findings = run_invariants(conn, expected_domains=domains)
 
     if ok:
         print("INVARIANTS: PASS")
@@ -698,6 +734,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # validate
     p = sub.add_parser("validate", help="run pre-import invariants on a modified db")
     p.add_argument("db", help="path to modified (working copy) db")
+    p.add_argument("--domains", help="comma-separated domains (default: weight)")
 
     # diff
     p = sub.add_parser("diff", help="post-import diff (Phase E)")

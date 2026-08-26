@@ -50,7 +50,7 @@ class ActivityCanonicalRecord:
 def build_activity_canonical(
     interval_records: list[IntervalRecord],
     *,
-    cutoffs: Optional[dict[str, int]] = None,
+    cutoffs: dict[str, int | None] | None = None,
 ) -> tuple[list[ActivityCanonicalRecord], dict[str, int]]:
     """
     Build canonical activity records from IntervalRecords.
@@ -96,7 +96,10 @@ def build_activity_canonical(
 
         # Check cutoff
         cutoff = cutoffs.get(rec.kind)
-        if cutoff is not None and rec.start_ms() >= cutoff:
+        # Cutoff semantics (PoC parity): the WHOLE interval must end before the
+        # cutoff — a day whose end reaches into live on-phone data would
+        # double-count that portion. Comparing start_ms would admit such days.
+        if cutoff is not None and rec.end_ms() >= cutoff:
             stats[f"cutoff_{rec.kind}"] += 1
             continue
 

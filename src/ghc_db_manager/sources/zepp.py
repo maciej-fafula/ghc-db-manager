@@ -25,6 +25,7 @@ Notes:
 import csv
 import datetime
 import pathlib
+import sys
 
 from ghc_db_manager.sources import RawRecord, IntervalRecord, register
 
@@ -118,6 +119,21 @@ def _evening_previous_day(date: datetime.date, time_str: str, threshold_hour: in
 # Phase C — BODY (already implemented)
 # ---------------------------------------------------------------------------
 
+def _safe_raw_fields(row: dict) -> dict:
+    """DictReader rows can contain row[None] = [extra values] when a row has
+    more fields than the header (real Zepp SLEEP 'naps' column embeds JSON with
+    commas and backslash-escaped quotes that defeat CSV quoting). Keep traceability
+    without crashing: skip the None key, stringify lists."""
+    out = {}
+    for k, v in row.items():
+        if k is None:
+            out["_extra_fields"] = ",".join(str(x) for x in v) if isinstance(v, list) else str(v)
+        elif isinstance(v, str):
+            out[k] = v.strip()
+        else:
+            out[k] = str(v)
+    return out
+
 def parse_body(path: str) -> list[RawRecord]:
     """
     Parse a Zepp BODY CSV (UTF-8 with BOM, literal 'null' strings for missing
@@ -159,7 +175,7 @@ def parse_body(path: str) -> list[RawRecord]:
                 "muscle_rate_note": muscle_rate_note,
             }
 
-            raw_fields = {k: v.strip() for k, v in row.items()}
+            raw_fields = _safe_raw_fields(row)
 
             records.append(
                 RawRecord(
@@ -191,14 +207,17 @@ def parse_body(path: str) -> list[RawRecord]:
 # Phase D — ACTIVITY
 # ---------------------------------------------------------------------------
 
-def parse_activity(path: str) -> list[IntervalRecord]:
+def parse_activity(path: str, tz: str = TZ) -> list[IntervalRecord]:
     """
     Parse a Zepp ACTIVITY CSV (daily summaries: steps, distance, calories).
 
     Each row: date,steps,distance,runDistance,calories
     One IntervalRecord per day per metric (steps/distance/calories).
 
-    Skips all-zero days (steps=0 AND distance=0 AND calories=0).
+    GAP-9 fix: emit all three records (steps/distance/calories) whenever the
+    day is not all-zero, INCLUDING zero-valued metrics (PoC parity).
+
+    GAP-6 fix: tz parameter threads through for local-time conversions.
     """
     records: list[IntervalRecord] = []
     with open(path, encoding="utf-8-sig") as f:
@@ -217,54 +236,53 @@ def parse_activity(path: str) -> list[IntervalRecord]:
             if steps == 0 and distance == 0 and calories == 0:
                 continue  # all-zero day skip
 
-            # Local midnight in UTC
+            # Local midnight in UTC (GAP-6 fix: use tz param)
             from ghc_db_manager.timeutil import local_midnight_as_utc
-            start_utc = local_midnight_as_utc(day, TZ)
+            start_utc = local_midnight_as_utc(day, tz)
             end_utc = start_utc + datetime.timedelta(days=1)
 
-            start_off = zone_offset_seconds(start_utc, TZ)
-            end_off = zone_offset_seconds(end_utc, TZ)
+            start_off = zone_offset_seconds(start_utc, tz)
+            end_off = zone_offset_seconds(end_utc, tz)
 
             from ghc_db_manager import knowledge as kn
             local_date = kn.local_date_epoch_days(int(start_utc.timestamp() * 1000), start_off)
 
-            raw_fields = {k: v.strip() for k, v in row.items()}
+            raw_fields = _safe_raw_fields(row)
 
-            if steps > 0:
-                records.append(IntervalRecord(
-                    kind="steps",
-                    start_utc=start_utc,
-                    end_utc=end_utc,
-                    start_offset_seconds=start_off,
-                    end_offset_seconds=end_off,
-                    local_date=local_date,
-                    extra={"count": steps},
-                    raw=raw_fields,
-                ))
+            # GAP-9 fix: emit ALL three records when day is not all-zero,
+            # INCLUDING zero-valued metrics (PoC parity).
+            records.append(IntervalRecord(
+                kind="steps",
+                start_utc=start_utc,
+                end_utc=end_utc,
+                start_offset_seconds=start_off,
+                end_offset_seconds=end_off,
+                local_date=local_date,
+                extra={"count": steps},
+                raw=raw_fields,
+            ))
 
-            if distance > 0:
-                records.append(IntervalRecord(
-                    kind="distance",
-                    start_utc=start_utc,
-                    end_utc=end_utc,
-                    start_offset_seconds=start_off,
-                    end_offset_seconds=end_off,
-                    local_date=local_date,
-                    extra={"distance": float(distance)},
-                    raw=raw_fields,
-                ))
+            records.append(IntervalRecord(
+                kind="distance",
+                start_utc=start_utc,
+                end_utc=end_utc,
+                start_offset_seconds=start_off,
+                end_offset_seconds=end_off,
+                local_date=local_date,
+                extra={"distance": float(distance)},
+                raw=raw_fields,
+            ))
 
-            if calories > 0:
-                records.append(IntervalRecord(
-                    kind="calories",
-                    start_utc=start_utc,
-                    end_utc=end_utc,
-                    start_offset_seconds=start_off,
-                    end_offset_seconds=end_off,
-                    local_date=local_date,
-                    extra={"energy": float(calories) * 1000.0},  # kcal × 1000
-                    raw=raw_fields,
-                ))
+            records.append(IntervalRecord(
+                kind="calories",
+                start_utc=start_utc,
+                end_utc=end_utc,
+                start_offset_seconds=start_off,
+                end_offset_seconds=end_off,
+                local_date=local_date,
+                extra={"energy": float(calories) * 1000.0},  # kcal × 1000
+                raw=raw_fields,
+            ))
 
     return records
 
@@ -302,7 +320,7 @@ def parse_sleep(path: str) -> list[IntervalRecord]:
             # Sleep sessions: local_date is START-based (HC canonical recomputed form, per PoC E.6)
             local_date = kn.local_date_epoch_days(int(s_dt.timestamp() * 1000), s_off)
 
-            raw_fields = {k: v.strip() for k, v in row.items()}
+            raw_fields = _safe_raw_fields(row)
 
             records.append(IntervalRecord(
                 kind="sleep",
@@ -317,11 +335,7 @@ def parse_sleep(path: str) -> list[IntervalRecord]:
     return records
 
 
-# ---------------------------------------------------------------------------
-# Phase D — SLEEP_MINUTE
-# ---------------------------------------------------------------------------
-
-def parse_sleep_minute(path: str) -> list[IntervalRecord]:
+def parse_sleep_minute(path: str, tz: str = TZ) -> list[IntervalRecord]:
     """
     Parse a Zepp SLEEP_MINUTE CSV (per-minute sleep stage data).
 
@@ -333,6 +347,10 @@ def parse_sleep_minute(path: str) -> list[IntervalRecord]:
 
     Groups consecutive same-stage minutes into segments, then emits one
     IntervalRecord per night (date = wake date) with stages list.
+
+    Real-data audit (2026-08): 207 duplicate (night_date, time_str) rows exist
+    across 4 re-sync blocks. Deduplication uses keep-FIRST policy (documented
+    choice: 11 real dup keys have conflicting stages; keep-first is deliberate).
     """
     from collections import defaultdict
 
@@ -362,6 +380,17 @@ def parse_sleep_minute(path: str) -> list[IntervalRecord]:
                 "stage": stage,
             })
 
+    # ---- GAP-1 FIX: dedupe (night_date, time_str) BEFORE segmentation ----
+    # Real data has 207 duplicate (date,time) rows; duplicates fragment segments.
+    # keep-FIRST policy: 11 real dup keys have conflicting stages — first wins.
+    for wake_date in mins_by_wake_date:
+        seen: dict[tuple, dict] = {}
+        for m in mins_by_wake_date[wake_date]:
+            key = (m["night_date"], m["time_str"])
+            if key not in seen:
+                seen[key] = m
+        mins_by_wake_date[wake_date] = list(seen.values())
+
     # Build stage segments per wake date
     records: list[IntervalRecord] = []
     from ghc_db_manager import knowledge as kn
@@ -378,11 +407,17 @@ def parse_sleep_minute(path: str) -> list[IntervalRecord]:
             time_str = m["time_str"]
             stage_str = m["stage"]
 
-            # Convert local time to UTC
-            t_utc = _local_time_to_utc(night_date, time_str, TZ)
+            # Convert local time to UTC (GAP-6 fix: use tz param instead of hardcoded global)
+            t_utc = _local_time_to_utc(night_date, time_str, tz)
 
-            if segs and segs[-1][2] == stage_str:
-                # Same stage as previous — extend end
+            if (
+                segs
+                and segs[-1][2] == stage_str
+                and t_utc == segs[-1][1] + datetime.timedelta(minutes=1)
+            ):
+                # Same stage AND strictly consecutive minute — extend end.
+                # (PoC parity: gaps in minute data start a NEW segment; merging
+                # across gaps silently fabricates stage coverage.)
                 segs[-1][1] = t_utc
             else:
                 segs.append([t_utc, t_utc, stage_str])
@@ -422,7 +457,7 @@ def parse_sleep_minute(path: str) -> list[IntervalRecord]:
 # Phase D — HEARTRATE_AUTO
 # ---------------------------------------------------------------------------
 
-def parse_hr_auto(path: str) -> list[IntervalRecord]:
+def parse_hr_auto(path: str, tz: str = TZ) -> list[IntervalRecord]:
     """
     Parse a Zepp HEARTRATE_AUTO CSV (every-5-minute automatic samples).
 
@@ -448,8 +483,8 @@ def parse_hr_auto(path: str) -> list[IntervalRecord]:
             if bpm is None:
                 continue
 
-            # Convert local time to UTC
-            t_utc = _local_time_to_utc(day, time_str, TZ)
+            # Convert local time to UTC (GAP-6 fix: use tz param)
+            t_utc = _local_time_to_utc(day, time_str, tz)
             epoch_ms = int(t_utc.timestamp() * 1000)
 
             samples_by_day[day].append((epoch_ms, bpm))
@@ -467,8 +502,9 @@ def parse_hr_auto(path: str) -> list[IntervalRecord]:
         last_utc = datetime.datetime.fromtimestamp(last_ms / 1000, datetime.timezone.utc)
 
         from ghc_db_manager import knowledge as kn
-        start_off = zone_offset_seconds(first_utc, TZ)
-        end_off = zone_offset_seconds(last_utc, TZ)
+        # GAP-6 fix: use tz param instead of hardcoded TZ
+        start_off = zone_offset_seconds(first_utc, tz)
+        end_off = zone_offset_seconds(last_utc, tz)
         local_date = kn.local_date_epoch_days(first_ms, start_off)
 
         records.append(IntervalRecord(
@@ -544,7 +580,7 @@ def parse_hr_manual(path: str) -> list[IntervalRecord]:
 from ghc_db_manager.knowledge import ZEPP_SPORT_MAP
 
 
-def parse_sport(path: str) -> list[IntervalRecord]:
+def parse_sport(path: str, tz: str = TZ, stats_out: dict | None = None) -> list[IntervalRecord]:
     """
     Parse a Zepp SPORT CSV (workout sessions).
 
@@ -552,6 +588,10 @@ def parse_sport(path: str) -> list[IntervalRecord]:
     end = start + sportTime.
     Maps type → (HC exercise_type, title) via ZEPP_SPORT_MAP.
     NO distance/calorie records are emitted (double-count guard).
+
+    GAP-6 fix: tz parameter for local-time conversions.
+    GAP-11 fix: unknown sport types are counted as `unknown_sport_type` in stats
+    (returned via the stats_out parameter) instead of silently dropped.
     """
     records: list[IntervalRecord] = []
 
@@ -567,7 +607,15 @@ def parse_sport(path: str) -> list[IntervalRecord]:
 
             sport_type = ZEPP_SPORT_MAP.get(type_str)
             if sport_type is None:
-                continue  # unknown sport type
+                # GAP-11: unknown sport types must not vanish silently
+                if stats_out is not None:
+                    stats_out["unknown_sport_type"] = stats_out.get("unknown_sport_type", 0) + 1
+                print(
+                    f"WARNING: unknown Zepp sport type {type_str!r} in {pathlib.Path(path).name} "
+                    f"— row skipped (extend ZEPP_SPORT_MAP to import it)",
+                    file=sys.stderr,
+                )
+                continue
 
             hc_type, title = sport_type
 
@@ -576,11 +624,12 @@ def parse_sport(path: str) -> list[IntervalRecord]:
             e_dt = s_dt + datetime.timedelta(seconds=dur_s)
 
             from ghc_db_manager import knowledge as kn
-            s_off = zone_offset_seconds(s_dt, TZ)
-            e_off = zone_offset_seconds(e_dt, TZ)
+            # GAP-6 fix: use tz param
+            s_off = zone_offset_seconds(s_dt, tz)
+            e_off = zone_offset_seconds(e_dt, tz)
             local_date = kn.local_date_epoch_days(int(s_dt.timestamp() * 1000), s_off)
 
-            raw_fields = {k: v.strip() for k, v in row.items()}
+            raw_fields = _safe_raw_fields(row)
 
             records.append(IntervalRecord(
                 kind="exercise",
@@ -604,12 +653,50 @@ def parse_sport(path: str) -> list[IntervalRecord]:
 # Unified load function (used by the registry)
 # ---------------------------------------------------------------------------
 
-def load_zepp(path: str) -> list[RawRecord | IntervalRecord]:
+# Real Zepp exports name files with a timestamp suffix (BODY_1787404253776.csv),
+# so dispatch matches by PREFIX, most specific first (SLEEP_MINUTE before SLEEP,
+# HEARTRATE_AUTO before HEARTRATE). ACTIVITY_MINUTE/ACTIVITY_STAGE are not
+# imported (PoC scope) and are explicitly skipped.
+_FILE_DISPATCH: list[tuple[str, str | None]] = [
+    ("SLEEP_MINUTE", "parse_sleep_minute"),
+    ("HEARTRATE_AUTO", "parse_hr_auto"),
+    ("ACTIVITY_MINUTE", None),   # not imported (out of PoC scope)
+    ("ACTIVITY_STAGE", None),    # not imported (out of PoC scope)
+    ("BODY", "parse_body"),
+    ("ACTIVITY", "parse_activity"),
+    ("SLEEP", "parse_sleep"),
+    ("HEARTRATE", "parse_hr_manual"),
+    ("SPORT", "parse_sport"),
+]
+
+
+def _dispatch_zepp_file(path: str, tz: str = TZ) -> list:
+    """GAP-6 fix: tz parameter threaded through dispatch."""
+    stem = pathlib.Path(path).stem.upper()
+    for prefix, fn_name in _FILE_DISPATCH:
+        if stem.startswith(prefix):
+            if fn_name is None:
+                return []
+            fn = globals()[fn_name]
+            # Pass tz to parse functions that accept it
+            if fn_name in ("parse_sleep_minute", "parse_hr_auto",
+                           "parse_activity", "parse_sport"):
+                return fn(path, tz)
+            return fn(path)
+    return []
+
+
+def load_zepp(path: str, tz: str = TZ) -> list[RawRecord | IntervalRecord]:
     """
     Load all Zepp data from a path.
 
+    GAP-6 fix: accepts optional tz IANA timezone string, threaded to all
+    parse functions that do local-time conversions (SLEEP_MINUTE, HEARTRATE_AUTO,
+    ACTIVITY, SPORT).
+
     If path is a file → dispatches to the appropriate parse_* function based
-    on filename (BODY → parse_body, ACTIVITY → parse_activity, etc.).
+    on filename prefix (BODY_* → parse_body, ACTIVITY_* → parse_activity, etc.
+    — real exports suffix filenames with timestamps).
 
     If path is a directory → walks the directory tree, finds all .csv files,
     parses them all, and returns aggregated records.
@@ -620,28 +707,12 @@ def load_zepp(path: str) -> list[RawRecord | IntervalRecord]:
     p = pathlib.Path(path)
 
     if p.is_file():
-        name = p.stem.upper()
-        if name == "BODY":
-            return parse_body(path)  # type: ignore[return-value]
-        elif name == "ACTIVITY":
-            return parse_activity(path)  # type: ignore[return-value]
-        elif name == "SLEEP":
-            return parse_sleep(path)  # type: ignore[return-value]
-        elif name == "SLEEP_MINUTE":
-            return parse_sleep_minute(path)  # type: ignore[return-value]
-        elif name == "HEARTRATE_AUTO":
-            return parse_hr_auto(path)  # type: ignore[return-value]
-        elif name == "HEARTRATE":
-            return parse_hr_manual(path)  # type: ignore[return-value]
-        elif name == "SPORT":
-            return parse_sport(path)  # type: ignore[return-value]
-        else:
-            return []
+        return _dispatch_zepp_file(path, tz)
 
     elif p.is_dir():
         results: list[RawRecord | IntervalRecord] = []
         for csv_path in p.rglob("*.csv"):
-            results.extend(load_zepp(str(csv_path)))
+            results.extend(load_zepp(str(csv_path), tz))
         return results
 
     return []
